@@ -70,6 +70,7 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
   const [currentUserText, setCurrentUserText] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [debugInfo, setDebugInfo] = useState<string[]>([])
+  const [voicesLoaded, setVoicesLoaded] = useState(false)
 
   const callStartTime = useRef<Date | null>(null)
   const durationInterval = useRef<NodeJS.Timeout | null>(null)
@@ -78,6 +79,7 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
   const conversationHistory = useRef<Array<{ role: string; content: string }>>([])
   const shouldRestart = useRef(false)
   const restartTimeout = useRef<NodeJS.Timeout | null>(null)
+  const currentUtterance = useRef<SpeechSynthesisUtterance | null>(null)
 
   const addDebugInfo = (message: string) => {
     const timestamp = new Date().toLocaleTimeString()
@@ -85,14 +87,45 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
     console.log(`[Voice Debug] ${message}`)
   }
 
+  // Load voices and setup speech synthesis
+  const loadVoices = () => {
+    if (synthesis.current) {
+      const voices = synthesis.current.getVoices()
+      addDebugInfo(`Loaded ${voices.length} voices`)
+
+      if (voices.length > 0) {
+        setVoicesLoaded(true)
+        // Log available voices for debugging
+        voices.forEach((voice, index) => {
+          console.log(`Voice ${index}: ${voice.name} (${voice.lang}) - ${voice.gender || "unknown gender"}`)
+        })
+      }
+    }
+  }
+
   useEffect(() => {
     // Initialize speech recognition and synthesis
     if (typeof window !== "undefined") {
+      // Speech Synthesis
+      synthesis.current = window.speechSynthesis
+
+      if (synthesis.current) {
+        // Load voices immediately
+        loadVoices()
+
+        // Also listen for voices changed event (some browsers load voices asynchronously)
+        synthesis.current.onvoiceschanged = loadVoices
+
+        addDebugInfo("Speech synthesis initialized")
+      } else {
+        addDebugInfo("Speech synthesis not available")
+      }
+
       // Speech Recognition
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
       if (SpeechRecognition) {
         recognition.current = new SpeechRecognition()
-        recognition.current.continuous = false // Changed to false for better control
+        recognition.current.continuous = false
         recognition.current.interimResults = true
         recognition.current.lang = "en-US"
 
@@ -132,7 +165,6 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
           switch (event.error) {
             case "no-speech":
               errorMessage = "No speech detected. Try speaking louder."
-              // Don't show error for no-speech, just restart
               if (isCallActive && !isMuted && !isSpeaking) {
                 shouldRestart.current = true
               }
@@ -160,7 +192,6 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
           addDebugInfo("Speech recognition ended")
           setIsListening(false)
 
-          // Restart listening if call is still active and not muted and not speaking
           if (isCallActive && !isMuted && !isSpeaking && shouldRestart.current) {
             addDebugInfo("Scheduling restart of speech recognition...")
             restartTimeout.current = setTimeout(() => {
@@ -173,9 +204,6 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       } else {
         setError("Speech recognition not supported in this browser. Please use Chrome, Edge, or Safari.")
       }
-
-      // Speech Synthesis
-      synthesis.current = window.speechSynthesis
     }
 
     return () => {
@@ -192,6 +220,11 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
         synthesis.current.cancel()
       }
     }
+  }, [])
+
+  // Separate useEffect for call state changes
+  useEffect(() => {
+    // This effect handles state changes during the call
   }, [isCallActive, isMuted, isSpeaking])
 
   const startListening = () => {
@@ -225,35 +258,65 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
   }
 
   const speak = (text: string) => {
-    if (synthesis.current) {
-      addDebugInfo(`AI starting to speak: "${text.substring(0, 50)}..."`)
+    if (!synthesis.current) {
+      addDebugInfo("Speech synthesis not available")
+      setError("Speech synthesis not available in this browser")
+      return
+    }
 
-      // Stop listening before speaking
-      stopListening()
+    addDebugInfo(`AI starting to speak: "${text.substring(0, 50)}..."`)
 
-      // Cancel any ongoing speech
-      synthesis.current.cancel()
+    // Stop listening before speaking
+    stopListening()
+
+    // Cancel any ongoing speech
+    synthesis.current.cancel()
+
+    // Wait a moment for cancellation to complete
+    setTimeout(() => {
+      if (!synthesis.current) return
 
       const utterance = new SpeechSynthesisUtterance(text)
-      utterance.rate = 0.9
-      utterance.pitch = 1
-      utterance.volume = 1
+      currentUtterance.current = utterance
 
-      // Try to use a female voice
+      // Configure utterance
+      utterance.rate = 0.8 // Slightly slower for clarity
+      utterance.pitch = 1.1 // Slightly higher pitch for female voice
+      utterance.volume = 0.9
+      utterance.lang = "en-US"
+
+      // Try to find a good voice
       const voices = synthesis.current.getVoices()
-      const femaleVoice = voices.find(
-        (voice) =>
-          voice.name.toLowerCase().includes("female") ||
-          voice.name.toLowerCase().includes("woman") ||
-          voice.name.toLowerCase().includes("emma") ||
-          voice.name.toLowerCase().includes("samantha") ||
-          voice.name.toLowerCase().includes("karen") ||
-          voice.name.toLowerCase().includes("zira"),
-      )
+      addDebugInfo(`Available voices: ${voices.length}`)
 
-      if (femaleVoice) {
-        utterance.voice = femaleVoice
-        addDebugInfo(`Using voice: ${femaleVoice.name}`)
+      if (voices.length > 0) {
+        // Prefer female voices
+        const femaleVoice = voices.find(
+          (voice) =>
+            voice.lang.startsWith("en") &&
+            (voice.name.toLowerCase().includes("female") ||
+              voice.name.toLowerCase().includes("woman") ||
+              voice.name.toLowerCase().includes("samantha") ||
+              voice.name.toLowerCase().includes("karen") ||
+              voice.name.toLowerCase().includes("zira") ||
+              voice.name.toLowerCase().includes("hazel") ||
+              voice.name.toLowerCase().includes("susan") ||
+              voice.name.toLowerCase().includes("victoria") ||
+              voice.gender === "female"),
+        )
+
+        // Fallback to any English voice
+        const englishVoice = voices.find((voice) => voice.lang.startsWith("en"))
+
+        // Use the best available voice
+        const selectedVoice = femaleVoice || englishVoice || voices[0]
+
+        if (selectedVoice) {
+          utterance.voice = selectedVoice
+          addDebugInfo(`Using voice: ${selectedVoice.name} (${selectedVoice.lang})`)
+        }
+      } else {
+        addDebugInfo("No voices available, using default")
       }
 
       utterance.onstart = () => {
@@ -264,6 +327,7 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       utterance.onend = () => {
         addDebugInfo("AI speech ended, will resume listening...")
         setIsSpeaking(false)
+        currentUtterance.current = null
 
         // Resume listening after AI finishes speaking
         if (isCallActive && !isMuted) {
@@ -277,11 +341,37 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       utterance.onerror = (event) => {
         addDebugInfo(`Speech synthesis error: ${event.error}`)
         setIsSpeaking(false)
+        currentUtterance.current = null
+
+        // Try to resume listening even after speech error
+        if (isCallActive && !isMuted) {
+          setTimeout(() => {
+            addDebugInfo("Resuming listening after speech error...")
+            startListening()
+          }, 1000)
+        }
+
         setError(`Speech synthesis error: ${event.error}`)
       }
 
-      synthesis.current.speak(utterance)
-    }
+      utterance.onpause = () => {
+        addDebugInfo("Speech synthesis paused")
+      }
+
+      utterance.onresume = () => {
+        addDebugInfo("Speech synthesis resumed")
+      }
+
+      // Start speaking
+      try {
+        synthesis.current.speak(utterance)
+        addDebugInfo("Speech synthesis started")
+      } catch (error) {
+        addDebugInfo(`Error starting speech synthesis: ${error}`)
+        setError(`Failed to start speech: ${error}`)
+        setIsSpeaking(false)
+      }
+    }, 100)
   }
 
   const handleUserMessage = async (userText: string) => {
@@ -310,7 +400,7 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
         },
         body: JSON.stringify({
           message: userText,
-          history: conversationHistory.current.slice(-10), // Last 10 messages for context
+          history: conversationHistory.current.slice(-10),
           topic,
         }),
       })
@@ -358,6 +448,11 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
     try {
       addDebugInfo("Starting call...")
 
+      // Check if speech synthesis is available
+      if (!synthesis.current) {
+        throw new Error("Speech synthesis is not available in this browser.")
+      }
+
       // Check if speech recognition is available
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
       if (!SpeechRecognition) {
@@ -381,6 +476,14 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       // Test speech recognition setup
       if (!recognition.current) {
         throw new Error("Speech recognition failed to initialize")
+      }
+
+      // Ensure voices are loaded
+      if (!voicesLoaded) {
+        addDebugInfo("Loading voices...")
+        loadVoices()
+        // Give voices time to load
+        await new Promise((resolve) => setTimeout(resolve, 500))
       }
 
       // Start call via API
@@ -450,6 +553,10 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       synthesis.current.cancel()
     }
 
+    if (currentUtterance.current) {
+      currentUtterance.current = null
+    }
+
     if (durationInterval.current) {
       clearInterval(durationInterval.current)
     }
@@ -501,6 +608,11 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
     }
   }
 
+  const testSpeech = () => {
+    addDebugInfo("Testing speech synthesis...")
+    speak("Hello! This is a test of the speech synthesis system. Can you hear me clearly?")
+  }
+
   const getGreeting = (topic: string) => {
     const greetings = {
       "job-interview":
@@ -539,6 +651,7 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
             {isCallActive && <span className="font-mono">{formatDuration(callDuration)}</span>}
             {isListening && <Badge className="bg-red-500">🎤 Listening</Badge>}
             {isSpeaking && <Badge className="bg-blue-500">🔊 Emma Speaking</Badge>}
+            {voicesLoaded && <Badge variant="outline">Voices Ready</Badge>}
           </div>
         </CardHeader>
 
@@ -569,24 +682,30 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
           {/* Call Controls */}
           <div className="flex justify-center gap-4">
             {!isCallActive ? (
-              <Button
-                onClick={startCall}
-                disabled={isConnecting}
-                size="lg"
-                className="bg-green-600 hover:bg-green-700 text-white px-8"
-              >
-                {isConnecting ? (
-                  <>
-                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                    Connecting...
-                  </>
-                ) : (
-                  <>
-                    <Phone className="w-5 h-5 mr-2" />
-                    Start Voice Call
-                  </>
-                )}
-              </Button>
+              <div className="flex gap-3">
+                <Button
+                  onClick={startCall}
+                  disabled={isConnecting}
+                  size="lg"
+                  className="bg-green-600 hover:bg-green-700 text-white px-8"
+                >
+                  {isConnecting ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                      Connecting...
+                    </>
+                  ) : (
+                    <>
+                      <Phone className="w-5 h-5 mr-2" />
+                      Start Voice Call
+                    </>
+                  )}
+                </Button>
+
+                <Button onClick={testSpeech} variant="outline" size="lg">
+                  🔊 Test Speech
+                </Button>
+              </div>
             ) : (
               <div className="flex gap-3">
                 <Button onClick={toggleMute} variant={isMuted ? "destructive" : "secondary"} size="lg">
@@ -649,8 +768,8 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
           {!isCallActive && (
             <div className="text-center space-y-4 text-sm text-muted-foreground">
               <p>Click "Start Voice Call" to begin speaking with Emma</p>
+              <p>Use "Test Speech" to verify audio output is working</p>
               <p>Make sure your microphone is enabled and you're in a quiet environment</p>
-              <p>Emma will speak to you and listen to your responses in real-time</p>
             </div>
           )}
         </CardContent>
