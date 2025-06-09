@@ -49,15 +49,15 @@ DATABASE_URL=postgresql://username:password@hostname:port/database
 
 # Authentication
 JWT_SECRET=your-super-secret-jwt-key-here
-GOOGLE_OAUTH_CLIENT_ID=your-google-oauth-client-id
-GOOGLE_OAUTH_CLIENT_SECRET=your-google-oauth-client-secret
+GOOGLE_CLIENT_ID=your-google-oauth-client-id
+GOOGLE_CLIENT_SECRET=your-google-oauth-client-secret
 
 # AI Services
 GEMINI_API_KEY=your-gemini-api-key
 VAPI_API_KEY=your-vapi-api-key
 
-# Next.js
-NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID=your-google-oauth-client-id
+# Public Environment Variables
+PUBLIC_GOOGLE_CLIENT_ID=your-google-oauth-client-id
 \`\`\`
 
 ### 3. Database Setup
