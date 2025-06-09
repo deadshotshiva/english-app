@@ -4,47 +4,283 @@ import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Mic, MicOff, Phone, PhoneOff } from "lucide-react"
+import { Mic, MicOff, Phone, PhoneOff, Volume2 } from "lucide-react"
 
 interface VoiceCallInterfaceProps {
   topic: string
   onCallEnd: (callData: any) => void
 }
 
+// Declare SpeechRecognitionStatic interface
+declare global {
+  interface Window {
+    SpeechRecognition: any
+    webkitSpeechRecognition: any
+  }
+  interface SpeechRecognition extends EventTarget {
+    continuous: boolean
+    interimResults: boolean
+    lang: string
+    onresult: ((this: SpeechRecognition, ev: SpeechRecognitionEvent) => any) | null
+    onstart: ((this: SpeechRecognition, ev: Event) => any) | null
+    onend: ((this: SpeechRecognition, ev: Event) => any) | null
+    onerror: ((this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => any) | null
+    start: () => void
+    stop: () => void
+  }
+  interface SpeechRecognitionEvent extends Event {
+    results: SpeechRecognitionResultList
+    resultIndex: number
+  }
+  interface SpeechRecognitionResultList {
+    [index: number]: SpeechRecognitionResult
+    length: number
+  }
+  interface SpeechRecognitionResult {
+    [index: number]: SpeechRecognitionAlternative
+    isFinal: boolean
+    length: number
+  }
+  interface SpeechRecognitionAlternative {
+    transcript: string
+    confidence: number
+  }
+  interface SpeechRecognitionErrorEvent extends Event {
+    error: SpeechRecognitionError
+  }
+  type SpeechRecognitionError =
+    | "no-speech"
+    | "aborted"
+    | "audio-capture"
+    | "network"
+    | "not-allowed"
+    | "service-not-allowed"
+    | "bad-grammar"
+    | "language-not-supported"
+}
+
 export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps) {
   const [isCallActive, setIsCallActive] = useState(false)
   const [isConnecting, setIsConnecting] = useState(false)
   const [isMuted, setIsMuted] = useState(false)
+  const [isListening, setIsListening] = useState(false)
+  const [isSpeaking, setIsSpeaking] = useState(false)
   const [callDuration, setCallDuration] = useState(0)
   const [transcript, setTranscript] = useState<Array<{ role: string; text: string; timestamp: Date }>>([])
+  const [currentUserText, setCurrentUserText] = useState("")
+  const [error, setError] = useState<string | null>(null)
 
   const callStartTime = useRef<Date | null>(null)
   const durationInterval = useRef<NodeJS.Timeout | null>(null)
-  const vapiCall = useRef<any>(null)
+  const recognition = useRef<SpeechRecognition | null>(null)
+  const synthesis = useRef<SpeechSynthesis | null>(null)
+  const conversationHistory = useRef<Array<{ role: string; content: string }>>([])
 
   useEffect(() => {
-    // Load Vapi SDK
-    const script = document.createElement("script")
-    script.src = "https://cdn.jsdelivr.net/npm/@vapi-ai/web@latest/dist/index.js"
-    script.onload = () => {
-      console.log("Vapi SDK loaded")
+    // Initialize speech recognition and synthesis
+    if (typeof window !== "undefined") {
+      // Speech Recognition
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+      if (SpeechRecognition) {
+        recognition.current = new SpeechRecognition()
+        recognition.current.continuous = true
+        recognition.current.interimResults = true
+        recognition.current.lang = "en-US"
+
+        recognition.current.onresult = (event) => {
+          let finalTranscript = ""
+          let interimTranscript = ""
+
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const transcript = event.results[i][0].transcript
+            if (event.results[i].isFinal) {
+              finalTranscript += transcript
+            } else {
+              interimTranscript += transcript
+            }
+          }
+
+          if (finalTranscript) {
+            setCurrentUserText("")
+            handleUserMessage(finalTranscript.trim())
+          } else {
+            setCurrentUserText(interimTranscript)
+          }
+        }
+
+        recognition.current.onerror = (event) => {
+          console.error("Speech recognition error:", event.error)
+          setError(`Speech recognition error: ${event.error}`)
+          setIsListening(false)
+        }
+
+        recognition.current.onend = () => {
+          setIsListening(false)
+          // Restart listening if call is still active and not muted
+          if (isCallActive && !isMuted) {
+            setTimeout(() => {
+              startListening()
+            }, 100)
+          }
+        }
+      } else {
+        setError("Speech recognition not supported in this browser")
+      }
+
+      // Speech Synthesis
+      synthesis.current = window.speechSynthesis
     }
-    document.head.appendChild(script)
 
     return () => {
       if (durationInterval.current) {
         clearInterval(durationInterval.current)
       }
-      if (vapiCall.current) {
-        vapiCall.current.stop()
+      if (recognition.current) {
+        recognition.current.stop()
+      }
+      if (synthesis.current) {
+        synthesis.current.cancel()
       }
     }
   }, [])
 
-  const startCall = async () => {
-    setIsConnecting(true)
+  const startListening = () => {
+    if (recognition.current && !isListening && !isMuted) {
+      try {
+        recognition.current.start()
+        setIsListening(true)
+        setError(null)
+      } catch (error) {
+        console.error("Error starting speech recognition:", error)
+        setError("Failed to start speech recognition")
+      }
+    }
+  }
+
+  const stopListening = () => {
+    if (recognition.current && isListening) {
+      recognition.current.stop()
+      setIsListening(false)
+    }
+  }
+
+  const speak = (text: string) => {
+    if (synthesis.current) {
+      // Cancel any ongoing speech
+      synthesis.current.cancel()
+
+      const utterance = new SpeechSynthesisUtterance(text)
+      utterance.rate = 0.9
+      utterance.pitch = 1
+      utterance.volume = 1
+
+      // Try to use a female voice
+      const voices = synthesis.current.getVoices()
+      const femaleVoice = voices.find(
+        (voice) =>
+          voice.name.toLowerCase().includes("female") ||
+          voice.name.toLowerCase().includes("woman") ||
+          voice.name.toLowerCase().includes("emma") ||
+          voice.name.toLowerCase().includes("samantha") ||
+          voice.name.toLowerCase().includes("karen"),
+      )
+
+      if (femaleVoice) {
+        utterance.voice = femaleVoice
+      }
+
+      utterance.onstart = () => {
+        setIsSpeaking(true)
+        stopListening() // Stop listening while AI is speaking
+      }
+
+      utterance.onend = () => {
+        setIsSpeaking(false)
+        // Resume listening after AI finishes speaking
+        if (isCallActive && !isMuted) {
+          setTimeout(() => {
+            startListening()
+          }, 500)
+        }
+      }
+
+      utterance.onerror = (event) => {
+        console.error("Speech synthesis error:", event.error)
+        setIsSpeaking(false)
+        setError(`Speech synthesis error: ${event.error}`)
+      }
+
+      synthesis.current.speak(utterance)
+    }
+  }
+
+  const handleUserMessage = async (userText: string) => {
+    if (!userText.trim()) return
+
+    const userMessage = {
+      role: "user",
+      text: userText,
+      timestamp: new Date(),
+    }
+
+    setTranscript((prev) => [...prev, userMessage])
+    conversationHistory.current.push({ role: "user", content: userText })
 
     try {
+      // Get AI response
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message: userText,
+          history: conversationHistory.current.slice(-10), // Last 10 messages for context
+          topic,
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error("Failed to get AI response")
+      }
+
+      const data = await response.json()
+      const aiResponse = data.response
+
+      const aiMessage = {
+        role: "assistant",
+        text: aiResponse,
+        timestamp: new Date(),
+      }
+
+      setTranscript((prev) => [...prev, aiMessage])
+      conversationHistory.current.push({ role: "assistant", content: aiResponse })
+
+      // Speak the AI response
+      speak(aiResponse)
+    } catch (error) {
+      console.error("Error getting AI response:", error)
+      const errorMessage = "I'm sorry, I'm having trouble understanding right now. Could you please try again?"
+
+      const aiMessage = {
+        role: "assistant",
+        text: errorMessage,
+        timestamp: new Date(),
+      }
+
+      setTranscript((prev) => [...prev, aiMessage])
+      speak(errorMessage)
+    }
+  }
+
+  const startCall = async () => {
+    setIsConnecting(true)
+    setError(null)
+
+    try {
+      // Request microphone permission
+      await navigator.mediaDevices.getUserMedia({ audio: true })
+
       // Start call via API
       const response = await fetch("/api/voice/start-call", {
         method: "POST",
@@ -58,9 +294,6 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
         throw new Error("Failed to start call")
       }
 
-      const { callId } = await response.json()
-
-      // Initialize Vapi call (this would be the actual Vapi integration)
       setIsCallActive(true)
       setIsConnecting(false)
       callStartTime.current = new Date()
@@ -73,16 +306,33 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
         }
       }, 1000)
 
-      // Simulate conversation for demo
-      simulateConversation()
+      // AI greeting
+      const greeting = getGreeting(topic)
+      const aiMessage = {
+        role: "assistant",
+        text: greeting,
+        timestamp: new Date(),
+      }
+
+      setTranscript([aiMessage])
+      conversationHistory.current = [{ role: "assistant", content: greeting }]
+
+      // Speak greeting and then start listening
+      speak(greeting)
     } catch (error) {
       console.error("Error starting call:", error)
+      setError("Failed to start call. Please check your microphone permissions.")
       setIsConnecting(false)
     }
   }
 
   const endCall = async () => {
     setIsCallActive(false)
+    stopListening()
+
+    if (synthesis.current) {
+      synthesis.current.cancel()
+    }
 
     if (durationInterval.current) {
       clearInterval(durationInterval.current)
@@ -112,22 +362,31 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
   }
 
   const toggleMute = () => {
-    setIsMuted(!isMuted)
-    // In real implementation, this would mute/unmute the microphone
+    const newMutedState = !isMuted
+    setIsMuted(newMutedState)
+
+    if (newMutedState) {
+      stopListening()
+    } else if (isCallActive && !isSpeaking) {
+      startListening()
+    }
   }
 
-  const simulateConversation = () => {
-    // Simulate AI greeting
-    setTimeout(() => {
-      setTranscript((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          text: `Hi! I'm Emma, your English conversation coach. I'm excited to help you practice ${topic === "general" ? "English conversation" : topic.replace("-", " ")} today. How are you feeling?`,
-          timestamp: new Date(),
-        },
-      ])
-    }, 2000)
+  const getGreeting = (topic: string) => {
+    const greetings = {
+      "job-interview":
+        "Hi! I'm Emma, your English conversation coach. I'm excited to help you practice job interview skills today. Let's start with a simple question: Can you tell me a bit about yourself?",
+      travel:
+        "Hello! I'm Emma, and I'm here to help you practice English for travel situations. Imagine you're at an airport or hotel - what would you like to practice first?",
+      "daily-talk":
+        "Hi there! I'm Emma, your friendly English coach. Let's have a casual conversation today. How has your day been so far?",
+      business:
+        "Good day! I'm Emma, and I'll be helping you practice business English today. Let's imagine we're in a professional meeting. How would you introduce yourself?",
+      general:
+        "Hello! I'm Emma, your English conversation partner. I'm here to help you practice speaking naturally. What would you like to talk about today?",
+    }
+
+    return greetings[topic as keyof typeof greetings] || greetings.general
   }
 
   const formatDuration = (seconds: number) => {
@@ -141,16 +400,26 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       <Card>
         <CardHeader className="text-center">
           <CardTitle className="flex items-center justify-center gap-2">
-            <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse"></div>
-            Voice Conversation
+            <div
+              className={`w-3 h-3 rounded-full ${isCallActive ? "bg-green-500 animate-pulse" : "bg-gray-400"}`}
+            ></div>
+            Voice Conversation with Emma
           </CardTitle>
           <div className="flex items-center justify-center gap-4 text-sm text-muted-foreground">
             <Badge variant="secondary">{topic.replace("-", " ")}</Badge>
             {isCallActive && <span className="font-mono">{formatDuration(callDuration)}</span>}
+            {isListening && <Badge className="bg-red-500">🎤 Listening</Badge>}
+            {isSpeaking && <Badge className="bg-blue-500">🔊 Emma Speaking</Badge>}
           </div>
         </CardHeader>
 
         <CardContent className="space-y-6">
+          {error && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
+              <p className="text-sm text-red-600">{error}</p>
+            </div>
+          )}
+
           {/* Call Controls */}
           <div className="flex justify-center gap-4">
             {!isCallActive ? (
@@ -168,7 +437,7 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
                 ) : (
                   <>
                     <Phone className="w-5 h-5 mr-2" />
-                    Start Conversation
+                    Start Voice Call
                   </>
                 )}
               </Button>
@@ -186,6 +455,15 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
             )}
           </div>
 
+          {/* Current Speech Display */}
+          {currentUserText && (
+            <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+              <p className="text-sm text-blue-700">
+                <strong>You're saying:</strong> {currentUserText}
+              </p>
+            </div>
+          )}
+
           {/* Live Transcript */}
           {isCallActive && (
             <div className="space-y-4">
@@ -201,8 +479,14 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
                           message.role === "user" ? "bg-blue-500 text-white" : "bg-white border"
                         }`}
                       >
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-xs font-medium">{message.role === "user" ? "You" : "Emma"}</span>
+                          {message.role === "assistant" && <Volume2 className="w-3 h-3" />}
+                        </div>
                         <p className="text-sm">{message.text}</p>
-                        <p className="text-xs opacity-70 mt-1">{message.timestamp.toLocaleTimeString()}</p>
+                        <p className={`text-xs mt-1 ${message.role === "user" ? "text-blue-100" : "text-gray-500"}`}>
+                          {message.timestamp.toLocaleTimeString()}
+                        </p>
                       </div>
                     </div>
                   ))
@@ -214,8 +498,9 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
           {/* Instructions */}
           {!isCallActive && (
             <div className="text-center space-y-2 text-sm text-muted-foreground">
-              <p>Click "Start Conversation" to begin practicing with Emma</p>
-              <p>Make sure your microphone is enabled for the best experience</p>
+              <p>Click "Start Voice Call" to begin speaking with Emma</p>
+              <p>Make sure your microphone is enabled and you're in a quiet environment</p>
+              <p>Emma will speak to you and listen to your responses in real-time</p>
             </div>
           )}
         </CardContent>
