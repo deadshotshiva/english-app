@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Mic, MicOff, Phone, PhoneOff, Volume2 } from "lucide-react"
+import { Mic, MicOff, Phone, PhoneOff, Volume2, AlertCircle } from "lucide-react"
 
 interface VoiceCallInterfaceProps {
   topic: string
@@ -69,12 +69,21 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
   const [transcript, setTranscript] = useState<Array<{ role: string; text: string; timestamp: Date }>>([])
   const [currentUserText, setCurrentUserText] = useState("")
   const [error, setError] = useState<string | null>(null)
+  const [debugInfo, setDebugInfo] = useState<string[]>([])
 
   const callStartTime = useRef<Date | null>(null)
   const durationInterval = useRef<NodeJS.Timeout | null>(null)
   const recognition = useRef<SpeechRecognition | null>(null)
   const synthesis = useRef<SpeechSynthesis | null>(null)
   const conversationHistory = useRef<Array<{ role: string; content: string }>>([])
+  const shouldRestart = useRef(false)
+  const restartTimeout = useRef<NodeJS.Timeout | null>(null)
+
+  const addDebugInfo = (message: string) => {
+    const timestamp = new Date().toLocaleTimeString()
+    setDebugInfo((prev) => [...prev.slice(-4), `${timestamp}: ${message}`])
+    console.log(`[Voice Debug] ${message}`)
+  }
 
   useEffect(() => {
     // Initialize speech recognition and synthesis
@@ -83,18 +92,18 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
       if (SpeechRecognition) {
         recognition.current = new SpeechRecognition()
-        recognition.current.continuous = true
+        recognition.current.continuous = false // Changed to false for better control
         recognition.current.interimResults = true
         recognition.current.lang = "en-US"
 
         recognition.current.onstart = () => {
-          console.log("Speech recognition started")
+          addDebugInfo("Speech recognition started")
           setIsListening(true)
           setError(null)
         }
 
         recognition.current.onresult = (event) => {
-          console.log("Speech recognition result:", event)
+          addDebugInfo(`Speech result received (${event.results.length} results)`)
           let finalTranscript = ""
           let interimTranscript = ""
 
@@ -108,7 +117,7 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
           }
 
           if (finalTranscript) {
-            console.log("Final transcript:", finalTranscript)
+            addDebugInfo(`Final transcript: "${finalTranscript}"`)
             setCurrentUserText("")
             handleUserMessage(finalTranscript.trim())
           } else {
@@ -117,18 +126,22 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
         }
 
         recognition.current.onerror = (event) => {
-          console.error("Speech recognition error:", event.error)
+          addDebugInfo(`Speech recognition error: ${event.error}`)
           let errorMessage = `Speech recognition error: ${event.error}`
 
           switch (event.error) {
             case "no-speech":
-              errorMessage = "No speech detected. Please speak louder or check your microphone."
+              errorMessage = "No speech detected. Try speaking louder."
+              // Don't show error for no-speech, just restart
+              if (isCallActive && !isMuted && !isSpeaking) {
+                shouldRestart.current = true
+              }
               break
             case "audio-capture":
-              errorMessage = "Microphone not accessible. Please check your microphone connection."
+              errorMessage = "Microphone not accessible. Please check your microphone."
               break
             case "not-allowed":
-              errorMessage = "Microphone access denied. Please allow microphone access in your browser."
+              errorMessage = "Microphone access denied. Please allow microphone access."
               break
             case "network":
               errorMessage = "Network error. Please check your internet connection."
@@ -137,19 +150,24 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
               errorMessage = `Speech recognition error: ${event.error}`
           }
 
-          setError(errorMessage)
+          if (event.error !== "no-speech") {
+            setError(errorMessage)
+          }
           setIsListening(false)
         }
 
         recognition.current.onend = () => {
-          console.log("Speech recognition ended")
+          addDebugInfo("Speech recognition ended")
           setIsListening(false)
-          // Restart listening if call is still active and not muted
-          if (isCallActive && !isMuted && !isSpeaking) {
-            console.log("Restarting speech recognition...")
-            setTimeout(() => {
-              startListening()
-            }, 500)
+
+          // Restart listening if call is still active and not muted and not speaking
+          if (isCallActive && !isMuted && !isSpeaking && shouldRestart.current) {
+            addDebugInfo("Scheduling restart of speech recognition...")
+            restartTimeout.current = setTimeout(() => {
+              if (isCallActive && !isMuted && !isSpeaking) {
+                startListening()
+              }
+            }, 1000)
           }
         }
       } else {
@@ -164,6 +182,9 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       if (durationInterval.current) {
         clearInterval(durationInterval.current)
       }
+      if (restartTimeout.current) {
+        clearTimeout(restartTimeout.current)
+      }
       if (recognition.current) {
         recognition.current.stop()
       }
@@ -171,30 +192,33 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
         synthesis.current.cancel()
       }
     }
-  }, [])
+  }, [isCallActive, isMuted, isSpeaking])
 
   const startListening = () => {
     if (recognition.current && !isListening && !isMuted && !isSpeaking) {
       try {
-        console.log("Starting speech recognition...")
+        addDebugInfo("Attempting to start speech recognition...")
+        shouldRestart.current = true
         recognition.current.start()
         setError(null)
       } catch (error) {
-        console.error("Error starting speech recognition:", error)
+        addDebugInfo(`Error starting speech recognition: ${error}`)
         setError("Failed to start speech recognition. Please try again.")
       }
     } else {
-      console.log("Cannot start listening:", {
-        hasRecognition: !!recognition.current,
-        isListening,
-        isMuted,
-        isSpeaking,
-      })
+      addDebugInfo(
+        `Cannot start listening - hasRecognition: ${!!recognition.current}, isListening: ${isListening}, isMuted: ${isMuted}, isSpeaking: ${isSpeaking}`,
+      )
     }
   }
 
   const stopListening = () => {
     if (recognition.current && isListening) {
+      addDebugInfo("Stopping speech recognition...")
+      shouldRestart.current = false
+      if (restartTimeout.current) {
+        clearTimeout(restartTimeout.current)
+      }
       recognition.current.stop()
       setIsListening(false)
     }
@@ -202,6 +226,11 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
 
   const speak = (text: string) => {
     if (synthesis.current) {
+      addDebugInfo(`AI starting to speak: "${text.substring(0, 50)}..."`)
+
+      // Stop listening before speaking
+      stopListening()
+
       // Cancel any ongoing speech
       synthesis.current.cancel()
 
@@ -218,30 +247,35 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
           voice.name.toLowerCase().includes("woman") ||
           voice.name.toLowerCase().includes("emma") ||
           voice.name.toLowerCase().includes("samantha") ||
-          voice.name.toLowerCase().includes("karen"),
+          voice.name.toLowerCase().includes("karen") ||
+          voice.name.toLowerCase().includes("zira"),
       )
 
       if (femaleVoice) {
         utterance.voice = femaleVoice
+        addDebugInfo(`Using voice: ${femaleVoice.name}`)
       }
 
       utterance.onstart = () => {
+        addDebugInfo("AI speech started")
         setIsSpeaking(true)
-        stopListening() // Stop listening while AI is speaking
       }
 
       utterance.onend = () => {
+        addDebugInfo("AI speech ended, will resume listening...")
         setIsSpeaking(false)
+
         // Resume listening after AI finishes speaking
         if (isCallActive && !isMuted) {
           setTimeout(() => {
+            addDebugInfo("Resuming listening after AI speech...")
             startListening()
-          }, 500)
+          }, 1000)
         }
       }
 
       utterance.onerror = (event) => {
-        console.error("Speech synthesis error:", event.error)
+        addDebugInfo(`Speech synthesis error: ${event.error}`)
         setIsSpeaking(false)
         setError(`Speech synthesis error: ${event.error}`)
       }
@@ -252,6 +286,11 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
 
   const handleUserMessage = async (userText: string) => {
     if (!userText.trim()) return
+
+    addDebugInfo(`Processing user message: "${userText}"`)
+
+    // Stop listening while processing
+    stopListening()
 
     const userMessage = {
       role: "user",
@@ -283,6 +322,8 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       const data = await response.json()
       const aiResponse = data.response
 
+      addDebugInfo(`Got AI response: "${aiResponse.substring(0, 50)}..."`)
+
       const aiMessage = {
         role: "assistant",
         text: aiResponse,
@@ -295,7 +336,7 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       // Speak the AI response
       speak(aiResponse)
     } catch (error) {
-      console.error("Error getting AI response:", error)
+      addDebugInfo(`Error getting AI response: ${error}`)
       const errorMessage = "I'm sorry, I'm having trouble understanding right now. Could you please try again?"
 
       const aiMessage = {
@@ -312,8 +353,11 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
   const startCall = async () => {
     setIsConnecting(true)
     setError(null)
+    setDebugInfo([])
 
     try {
+      addDebugInfo("Starting call...")
+
       // Check if speech recognition is available
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
       if (!SpeechRecognition) {
@@ -321,7 +365,7 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       }
 
       // Request microphone permission explicitly
-      console.log("Requesting microphone permission...")
+      addDebugInfo("Requesting microphone permission...")
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -332,7 +376,7 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
 
       // Stop the stream immediately (we just needed permission)
       stream.getTracks().forEach((track) => track.stop())
-      console.log("Microphone permission granted")
+      addDebugInfo("Microphone permission granted")
 
       // Test speech recognition setup
       if (!recognition.current) {
@@ -375,10 +419,12 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       setTranscript([aiMessage])
       conversationHistory.current = [{ role: "assistant", content: greeting }]
 
+      addDebugInfo("Call started successfully")
+
       // Speak greeting and then start listening
       speak(greeting)
     } catch (error) {
-      console.error("Error starting call:", error)
+      addDebugInfo(`Error starting call: ${error}`)
       if (error instanceof Error) {
         if (error.name === "NotAllowedError") {
           setError("Microphone access denied. Please allow microphone access and try again.")
@@ -395,7 +441,9 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
   }
 
   const endCall = async () => {
+    addDebugInfo("Ending call...")
     setIsCallActive(false)
+    shouldRestart.current = false
     stopListening()
 
     if (synthesis.current) {
@@ -404,6 +452,10 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
 
     if (durationInterval.current) {
       clearInterval(durationInterval.current)
+    }
+
+    if (restartTimeout.current) {
+      clearTimeout(restartTimeout.current)
     }
 
     const callData = {
@@ -432,11 +484,20 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
   const toggleMute = () => {
     const newMutedState = !isMuted
     setIsMuted(newMutedState)
+    addDebugInfo(`Mute toggled: ${newMutedState}`)
 
     if (newMutedState) {
       stopListening()
     } else if (isCallActive && !isSpeaking) {
-      startListening()
+      setTimeout(() => startListening(), 500)
+    }
+  }
+
+  const forceStartListening = () => {
+    addDebugInfo("Force starting listening...")
+    if (isCallActive && !isSpeaking) {
+      stopListening()
+      setTimeout(() => startListening(), 500)
     }
   }
 
@@ -488,6 +549,23 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
             </div>
           )}
 
+          {/* Debug Info */}
+          {debugInfo.length > 0 && (
+            <div className="p-3 bg-gray-50 border border-gray-200 rounded-lg">
+              <div className="flex items-center gap-2 mb-2">
+                <AlertCircle className="w-4 h-4 text-gray-600" />
+                <span className="text-sm font-medium text-gray-700">Debug Info:</span>
+              </div>
+              <div className="space-y-1">
+                {debugInfo.map((info, index) => (
+                  <p key={index} className="text-xs text-gray-600 font-mono">
+                    {info}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Call Controls */}
           <div className="flex justify-center gap-4">
             {!isCallActive ? (
@@ -513,6 +591,10 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
               <div className="flex gap-3">
                 <Button onClick={toggleMute} variant={isMuted ? "destructive" : "secondary"} size="lg">
                   {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                </Button>
+
+                <Button onClick={forceStartListening} variant="outline" size="lg" disabled={isSpeaking || isListening}>
+                  🎤 Start Listening
                 </Button>
 
                 <Button onClick={endCall} variant="destructive" size="lg" className="px-8">
@@ -569,26 +651,6 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
               <p>Click "Start Voice Call" to begin speaking with Emma</p>
               <p>Make sure your microphone is enabled and you're in a quiet environment</p>
               <p>Emma will speak to you and listen to your responses in real-time</p>
-
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={async () => {
-                  try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-                    stream.getTracks().forEach((track) => track.stop())
-                    setError(null)
-                    alert("Microphone test successful! You can start the call.")
-                  } catch (error) {
-                    console.error("Microphone test failed:", error)
-                    if (error instanceof Error) {
-                      setError(`Microphone test failed: ${error.message}`)
-                    }
-                  }
-                }}
-              >
-                Test Microphone
-              </Button>
             </div>
           )}
         </CardContent>
