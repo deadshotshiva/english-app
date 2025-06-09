@@ -87,7 +87,14 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
         recognition.current.interimResults = true
         recognition.current.lang = "en-US"
 
+        recognition.current.onstart = () => {
+          console.log("Speech recognition started")
+          setIsListening(true)
+          setError(null)
+        }
+
         recognition.current.onresult = (event) => {
+          console.log("Speech recognition result:", event)
           let finalTranscript = ""
           let interimTranscript = ""
 
@@ -101,6 +108,7 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
           }
 
           if (finalTranscript) {
+            console.log("Final transcript:", finalTranscript)
             setCurrentUserText("")
             handleUserMessage(finalTranscript.trim())
           } else {
@@ -110,21 +118,42 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
 
         recognition.current.onerror = (event) => {
           console.error("Speech recognition error:", event.error)
-          setError(`Speech recognition error: ${event.error}`)
+          let errorMessage = `Speech recognition error: ${event.error}`
+
+          switch (event.error) {
+            case "no-speech":
+              errorMessage = "No speech detected. Please speak louder or check your microphone."
+              break
+            case "audio-capture":
+              errorMessage = "Microphone not accessible. Please check your microphone connection."
+              break
+            case "not-allowed":
+              errorMessage = "Microphone access denied. Please allow microphone access in your browser."
+              break
+            case "network":
+              errorMessage = "Network error. Please check your internet connection."
+              break
+            default:
+              errorMessage = `Speech recognition error: ${event.error}`
+          }
+
+          setError(errorMessage)
           setIsListening(false)
         }
 
         recognition.current.onend = () => {
+          console.log("Speech recognition ended")
           setIsListening(false)
           // Restart listening if call is still active and not muted
-          if (isCallActive && !isMuted) {
+          if (isCallActive && !isMuted && !isSpeaking) {
+            console.log("Restarting speech recognition...")
             setTimeout(() => {
               startListening()
-            }, 100)
+            }, 500)
           }
         }
       } else {
-        setError("Speech recognition not supported in this browser")
+        setError("Speech recognition not supported in this browser. Please use Chrome, Edge, or Safari.")
       }
 
       // Speech Synthesis
@@ -145,15 +174,22 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
   }, [])
 
   const startListening = () => {
-    if (recognition.current && !isListening && !isMuted) {
+    if (recognition.current && !isListening && !isMuted && !isSpeaking) {
       try {
+        console.log("Starting speech recognition...")
         recognition.current.start()
-        setIsListening(true)
         setError(null)
       } catch (error) {
         console.error("Error starting speech recognition:", error)
-        setError("Failed to start speech recognition")
+        setError("Failed to start speech recognition. Please try again.")
       }
+    } else {
+      console.log("Cannot start listening:", {
+        hasRecognition: !!recognition.current,
+        isListening,
+        isMuted,
+        isSpeaking,
+      })
     }
   }
 
@@ -278,8 +314,30 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
     setError(null)
 
     try {
-      // Request microphone permission
-      await navigator.mediaDevices.getUserMedia({ audio: true })
+      // Check if speech recognition is available
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+      if (!SpeechRecognition) {
+        throw new Error("Speech recognition is not supported in this browser. Please use Chrome, Edge, or Safari.")
+      }
+
+      // Request microphone permission explicitly
+      console.log("Requesting microphone permission...")
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      })
+
+      // Stop the stream immediately (we just needed permission)
+      stream.getTracks().forEach((track) => track.stop())
+      console.log("Microphone permission granted")
+
+      // Test speech recognition setup
+      if (!recognition.current) {
+        throw new Error("Speech recognition failed to initialize")
+      }
 
       // Start call via API
       const response = await fetch("/api/voice/start-call", {
@@ -321,7 +379,17 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
       speak(greeting)
     } catch (error) {
       console.error("Error starting call:", error)
-      setError("Failed to start call. Please check your microphone permissions.")
+      if (error instanceof Error) {
+        if (error.name === "NotAllowedError") {
+          setError("Microphone access denied. Please allow microphone access and try again.")
+        } else if (error.name === "NotFoundError") {
+          setError("No microphone found. Please connect a microphone and try again.")
+        } else {
+          setError(error.message)
+        }
+      } else {
+        setError("Failed to start call. Please check your microphone permissions.")
+      }
       setIsConnecting(false)
     }
   }
@@ -497,10 +565,30 @@ export function VoiceCallInterface({ topic, onCallEnd }: VoiceCallInterfaceProps
 
           {/* Instructions */}
           {!isCallActive && (
-            <div className="text-center space-y-2 text-sm text-muted-foreground">
+            <div className="text-center space-y-4 text-sm text-muted-foreground">
               <p>Click "Start Voice Call" to begin speaking with Emma</p>
               <p>Make sure your microphone is enabled and you're in a quiet environment</p>
               <p>Emma will speak to you and listen to your responses in real-time</p>
+
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={async () => {
+                  try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+                    stream.getTracks().forEach((track) => track.stop())
+                    setError(null)
+                    alert("Microphone test successful! You can start the call.")
+                  } catch (error) {
+                    console.error("Microphone test failed:", error)
+                    if (error instanceof Error) {
+                      setError(`Microphone test failed: ${error.message}`)
+                    }
+                  }
+                }}
+              >
+                Test Microphone
+              </Button>
             </div>
           )}
         </CardContent>
